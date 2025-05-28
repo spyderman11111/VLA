@@ -1,9 +1,9 @@
 import dataclasses
 import numpy as np
-from pi0.model import transforms  # Adjust if needed
+from openpi import transforms
 
 def _parse_image(img):
-    return img.astype(np.uint8)  # Dummy parser for demo
+    return img.astype(np.uint8)
 
 @dataclasses.dataclass(frozen=True)
 class UR5Inputs(transforms.DataTransformFn):

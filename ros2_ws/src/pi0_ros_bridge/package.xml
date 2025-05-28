@@ -4,7 +4,7 @@
   <version>0.0.0</version>
   <description>ROS 2 bridge for pi0 model and UR5 control</description>
 
-  <maintainer email="你的邮箱@example.com">你的名字</maintainer>
+  <maintainer email="shuo.zhang@ipk.fraunhofer.de">shuo zhang</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
