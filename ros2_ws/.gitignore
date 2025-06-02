@@ -1,7 +1,0 @@
-# 忽略 ROS 构建目录
-**/build/
-**/log/
-**/install/
-
-# 忽略 IDE 配置
-.vscode/

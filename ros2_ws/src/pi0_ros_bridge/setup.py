@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'pi0_ros_node = pi0_ros_bridge.pi0_ros_node:main',
+            'pi0_ros_node = pi0_ros_bridge.main:main',
+            'fake_image_publisher = pi0_ros_bridge.fake_image_publisher:main',
         ],
     },
 )
