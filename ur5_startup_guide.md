@@ -14,7 +14,7 @@ source /opt/ros/humble/setup.bash
 ros2 launch ur_robot_driver ur_control.launch.py ur_type:=ur5e robot_ip:=172.18.6.20
 ```
 
-> 📌 Replace `robot_ip` with the actual IP address of your UR5 control box.
+>  Replace `robot_ip` with the actual IP address of your UR5 control box.
 
 ---
 
