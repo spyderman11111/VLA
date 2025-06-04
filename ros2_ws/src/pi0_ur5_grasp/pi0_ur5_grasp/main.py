@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import sys
 import numpy as np
 import rclpy
@@ -7,11 +6,10 @@ from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 
-# Import the π0 policy and supporting types from LeRobot (HuggingFace)
 from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
 from lerobot.configs.types import FeatureType, PolicyFeature
 
-# --- Define UR5Inputs and UR5Outputs classes (OpenPI style) ---
+# --- Define UR5Inputs and UR5Outputs classes ---
 class UR5Inputs:
     """Convert UR5 sensor data (images + joint state) to π0 model input format."""
     def __init__(self, action_dim=14, adapt_to_pi=True):

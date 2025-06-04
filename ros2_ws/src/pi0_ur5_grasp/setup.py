@@ -1,16 +1,14 @@
-from setuptools import setup
-
-package_name = 'pi0_ur5_grasp'
+from setuptools import setup, find_packages
 
 setup(
-    name=package_name,
+    name='pi0_ur5_grasp',
     version='0.0.1',
-    packages=[package_name],
+    packages=find_packages(),  # ✅ 自动查找 pi0_ur5_grasp 包
     data_files=[
         ('share/ament_index/resource_index/packages',
-         ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/pi0_grasp.launch.py']),
+         ['resource/pi0_ur5_grasp']),
+        ('share/pi0_ur5_grasp', ['package.xml']),
+        ('share/pi0_ur5_grasp/launch', ['launch/pi0_grasp.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -22,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pi0_grasp_node = pi0_ur5_grasp.main:main',
+            'home_pose = pi0_ur5_grasp.home_pose:main',
         ],
     },
 )
