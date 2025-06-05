@@ -20,7 +20,7 @@ class SimpleGraspNode(Node):
 
         # Configure input/output features
         self.policy.config.input_features = {
-            "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224)),
+            "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
             "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(14,)),
             "goal": PolicyFeature(type=FeatureType.ENV, shape=(48,))  # token ids
         }

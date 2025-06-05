@@ -3,3 +3,10 @@
 ros2_ws/build/
 ros2_ws/install/
 ros2_ws/log/
+openvla/
+lerobot/
+Log/
+build/
+install/
+log/
+__pycache__/
