@@ -16,21 +16,13 @@ class UR5InitPose(Node):
 
     def send_trajectory(self):
         joint_names = [
-            'shoulder_lift_joint',
-            'elbow_joint',
-            'wrist_1_joint',
-            'wrist_2_joint',
-            'wrist_3_joint',
-            'shoulder_pan_joint'
+            'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint',
+            'wrist_2_joint', 'wrist_3_joint', 'shoulder_pan_joint'
         ]
 
         home_positions = [
-            -1.495906178151266,
-            0.18928194046020508,
-            -0.2825863997088831,
-            -1.5792220274554651,
-            0.03916294872760773,
-            1.5943816900253296
+            -1.4959, 0.1893, -0.2826,
+            -1.5792, 0.0392, 1.5944
         ]
 
         msg = JointTrajectory()
@@ -38,12 +30,14 @@ class UR5InitPose(Node):
 
         point = JointTrajectoryPoint()
         point.positions = home_positions
-        point.time_from_start.sec = 2  
+        point.velocities = [0.3] * len(home_positions)  
+        point.time_from_start.sec = 3  
 
         msg.points.append(point)
         self.publisher_.publish(msg)
-        self.get_logger().info("new initial position command has been published")
+        self.get_logger().info("Initial pose with velocity published.")
         self.timer.cancel()
+
 
 def main(args=None):
     rclpy.init(args=args)

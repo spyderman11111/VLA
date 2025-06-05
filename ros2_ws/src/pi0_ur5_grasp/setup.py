@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name='pi0_ur5_grasp',
     version='0.0.1',
-    packages=find_packages(),  # ✅ 自动查找 pi0_ur5_grasp 包
+    packages=find_packages(),  
     data_files=[
         ('share/ament_index/resource_index/packages',
          ['resource/pi0_ur5_grasp']),
@@ -21,6 +21,8 @@ setup(
         'console_scripts': [
             'pi0_grasp_node = pi0_ur5_grasp.main:main',
             'home_pose = pi0_ur5_grasp.home_pose:main',
+            'simplegrasp = pi0_ur5_grasp.simplegrasp:main',
+            'smolvlagrasp = pi0_ur5_grasp.smolvlagrasp:main',
         ],
     },
 )
