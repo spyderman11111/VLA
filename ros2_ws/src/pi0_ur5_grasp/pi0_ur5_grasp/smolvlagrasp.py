@@ -5,6 +5,9 @@ import numpy as np
 from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
+from cv_bridge import CvBridge
+import cv2
+
 
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType
@@ -22,9 +25,9 @@ dummy_stats = {
     }
 }
 
-class SimpleGraspNode(Node):
+class SmolVLAGraspNode(Node):
     def __init__(self):
-        super().__init__('simple_grasp_node')
+        super().__init__('smolvla_grasp_node')
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -45,15 +48,16 @@ class SimpleGraspNode(Node):
         prompt = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else input("Prompt: ")
         tokenizer = self.policy.language_tokenizer
         tokenized = tokenizer(prompt, max_length=48, padding='max_length', truncation=True, return_tensors='pt')
-        self.prompt_tensor = tokenized["input_ids"].squeeze(0).float().to(self.device)
+        self.prompt_tensor = tokenized["input_ids"].squeeze(0).to(self.device)
+
+        self.bridge = CvBridge()
+        self.latest_image = None
+        self.latest_joints = None
+        self.processed = False
 
         self.joint_sub = self.create_subscription(JointState, '/joint_states', self.joint_cb, 10)
         self.image_sub = self.create_subscription(Image, '/camera/color/image_raw', self.image_cb, 10)
         self.pub = self.create_publisher(JointTrajectory, '/scaled_joint_trajectory_controller/joint_trajectory', 10)
-
-        self.latest_image = None
-        self.latest_joints = None
-        self.processed = False
 
         self.home_names = [
             'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint',
@@ -76,13 +80,15 @@ class SimpleGraspNode(Node):
         self.get_logger().info("Going to initial position...")
 
     def image_cb(self, msg):
-        h, w = msg.height, msg.width
-        img = np.frombuffer(msg.data, dtype=np.uint8).reshape((h, w, -1))
-        if msg.encoding.lower() == 'bgr8':
-            img = img[:, :, ::-1]
-        img = np.transpose(img.astype(np.float32) / 127.5 - 1.0, (2, 0, 1))
-        self.latest_image = torch.tensor(img, dtype=torch.float32, device=self.device)
-        self.try_infer()
+        try:
+            img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
+            img = cv2.resize(img, (512, 512))
+            img = (img.astype(np.float32) / 127.5) - 1.0
+            img = np.transpose(img, (2, 0, 1))  # (H, W, C) -> (C, H, W)
+            self.latest_image = torch.tensor(img, dtype=torch.float32, device=self.device)
+            self.try_infer()
+        except Exception as e:
+            self.get_logger().error(f"Image callback error: {e}")
 
     def joint_cb(self, msg):
         joints = np.array(msg.position, dtype=np.float32)
@@ -103,7 +109,7 @@ class SimpleGraspNode(Node):
 
         try:
             with torch.no_grad():
-                out = self.policy.forward(model_input)["action"]
+                out = self.policy(model_input)["action"]
             joints = out[0][:6].cpu().numpy()
             self.send_traj(joints)
             self.get_logger().info(f"Predicted action: {joints.tolist()}")
@@ -129,8 +135,7 @@ class SimpleGraspNode(Node):
         self.destroy_node()
         rclpy.shutdown()
 
-
 def main(args=None):
     rclpy.init(args=args)
-    node = SimpleGraspNode()
+    node = SmolVLAGraspNode()
     rclpy.spin(node)
