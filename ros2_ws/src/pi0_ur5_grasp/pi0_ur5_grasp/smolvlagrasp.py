@@ -35,7 +35,6 @@ class SmolVLAGraspNode(Node):
             "lerobot/smolvla_base",
             dataset_stats=dummy_stats
         ).to(self.device)
-
         self.policy.config.input_features = {
             "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
             "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(14,)),
@@ -81,11 +80,9 @@ class SmolVLAGraspNode(Node):
         try:
             print("Received image message")
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
-            print(f"Image shape (HWC): {img.shape}")
             img = cv2.resize(img, (512, 512))
             img = (img.astype(np.float32) / 127.5) - 1.0
             img = np.transpose(img, (2, 0, 1))
-            print(f"Image shape after processing (CHW): {img.shape}")
             self.latest_image = torch.tensor(img, dtype=torch.float32, device=self.device)
             print(f"Image tensor shape: {self.latest_image.shape}, device: {self.latest_image.device}")
             self.try_infer()
@@ -94,25 +91,22 @@ class SmolVLAGraspNode(Node):
             print(f"Image callback error: {e}")
 
     def joint_cb(self, msg):
-        print("Received joint state message")
-        joints = np.array(msg.position, dtype=np.float32)
-        print(f"Joint positions from message: {joints}")
-        padded = np.concatenate([joints, np.zeros(14 - len(joints))], dtype=np.float32)
-        print(f"Padded joint vector: {padded}")
-        self.latest_joints = torch.tensor(padded, dtype=torch.float32, device=self.device)
-        print(f"Joint tensor shape: {self.latest_joints.shape}, device: {self.latest_joints.device}")
-        self.try_infer()
+        try:
+            print("Received joint state message")
+            joints = np.array(msg.position, dtype=np.float32)
+            padded = np.concatenate([joints, np.zeros(14 - len(joints), dtype=np.float32)])
+            self.latest_joints = torch.tensor(padded, dtype=torch.float32, device=self.device)
+            print(f"Joint tensor shape: {self.latest_joints.shape}, device: {self.latest_joints.device}")
+            self.try_infer()
+        except Exception as e:
+            self.get_logger().error(f"Joint callback error: {e}")
+            print(f"Joint callback error: {e}")
 
     def try_infer(self):
-        print("Entered try_infer()")
-        if self.latest_image is None:
-            print("No image available")
-        if self.latest_joints is None:
-            print("No joint state available")
+        if self.latest_image is None or self.latest_joints is None:
+            return
         if self.processed:
             print("Already processed, skipping...")
-            return
-        if self.latest_image is None or self.latest_joints is None:
             return
 
         self.processed = True
@@ -121,77 +115,44 @@ class SmolVLAGraspNode(Node):
         model_input = {
             "observation.image": self.latest_image.unsqueeze(0),
             "observation.state": self.latest_joints.unsqueeze(0),
-            "task": [self.prompt]  
+            "task": [self.prompt]
         }
-
         print("Model input keys and shapes:")
         for k, v in model_input.items():
             if isinstance(v, torch.Tensor):
                 print(f"  {k}: {v.shape}, device: {v.device}")
             else:
                 print(f"  {k}: {type(v)} - {v}")
+
         try:
             with torch.no_grad():
-                # 1. 图像和mask
-                images = [model_input["observation.image"]]
-                masks = [torch.ones(1, dtype=torch.bool, device=self.device)]
-
-                # 2. 状态 padding 到 960
-                state_batch = {"observation.state": model_input["observation.state"]}
-                state = self.policy.prepare_state(state_batch)
-
-                print(f"State after padding: {state.shape}")  # 应为 [1, 960]
-
-                # 3. 文本 token
-                lang_tokens, lang_masks = self.policy.prepare_language(model_input)
-
-                # 4. 推理动作
-                action = self.policy.model.sample_actions(
-                    images, masks, lang_tokens, lang_masks, state
-                )
-
-                # 5. 对动作进行 padding
-                padded_action = self.policy.prepare_action({"action": action})
-
-                # 6. 再 unnormalize
-                action = self.policy.unnormalize_outputs({"action": padded_action})["action"]
-
-                print("Inference successful.")
-                print(f"Action tensor shape: {action.shape}")  
-
-            # 7. 提取最后一帧
-            joints = action[0, -1, :6].cpu().numpy()
-            print(f"Extracted joint output: {joints}")
-            self.send_traj(joints)
-            self.get_logger().info(f"Predicted action: {joints.tolist()}")
-            self.create_timer(4.0, self.reset_and_shutdown)
-
+                action = self.policy.select_action(model_input)
+                if isinstance(action, torch.Tensor):
+                    if action.ndim == 2 and action.shape[0] == 1:
+                        joints = action[0, :6].cpu().numpy().tolist()
+                    elif action.ndim == 1:
+                        joints = action[:6].cpu().numpy().tolist()
+                    else:
+                        raise ValueError(f"Unexpected action shape: {action.shape}")
+                else:
+                    raise ValueError("Model did not return a tensor")
+                joints = [float(x) for x in joints]
+                print(f"Predicted joint command: {joints}")
+                self.send_traj(joints)
+                self.get_logger().info(f"Predicted action: {joints}")
+                self.create_timer(4.0, self.reset_and_shutdown)
         except Exception as e:
             self.get_logger().error(f"Inference failed: {e}")
             print(f"Inference failed: {e}")
-            rclpy.shutdown()
-
-
-            # 6. 提取最后一帧前6个关节角
-            joints = action[0, -1, :6].cpu().numpy()
-            print(f"Extracted joint output: {joints}")
-            self.send_traj(joints)
-            self.get_logger().info(f"Predicted action: {joints.tolist()}")
-            self.create_timer(4.0, self.reset_and_shutdown)
-        except Exception as e:
-            self.get_logger().error(f"Inference failed: {e}")
-            print(f"Inference failed: {e}")
-            rclpy.shutdown()
-
-
+            self.reset_and_shutdown()
 
     def send_traj(self, positions):
         print("Sending trajectory command...")
         msg = JointTrajectory()
         msg.joint_names = self.home_names
         point = JointTrajectoryPoint()
-        point.positions = positions.tolist()
-        point.velocities = [0.2] * len(positions)
+        point.positions = positions
+        point.velocities = [0.15] * len(positions)
         point.time_from_start = Duration(sec=10)
         msg.points.append(point)
         self.pub.publish(msg)
