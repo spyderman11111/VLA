@@ -11,9 +11,10 @@ import cv2
 from lerobot.common.policies.smolvla.modeling_smolvla import SmolVLAPolicy
 from lerobot.configs.types import PolicyFeature, FeatureType
 
+
 import torch
 
-dummy_stats = {
+'''dummy_stats = {
     "observation.state": {
         "mean": torch.zeros(14),
         "std": torch.ones(14)
@@ -23,6 +24,8 @@ dummy_stats = {
         "std": torch.ones(14)
     }
 }
+'''
+stats = torch.load("/mnt/HDD/shuo/VLA/ros2_ws/src/pi0_ur5_grasp/pi0_ur5_grasp/berkeley_ur5_dataset_stats.pt")
 
 class SmolVLAGraspNode(Node):
     def __init__(self):
@@ -33,15 +36,15 @@ class SmolVLAGraspNode(Node):
 
         self.policy = SmolVLAPolicy.from_pretrained(
             "lerobot/smolvla_base",
-            dataset_stats=dummy_stats
+            dataset_stats=stats
         ).to(self.device)
         self.policy.config.input_features = {
             "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 512, 512)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(14,)),
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(7,)),
             "task": PolicyFeature(type=FeatureType.ENV, shape=(1,))
         }
         self.policy.config.output_features = {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(14,))
+            "action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))
         }
 
         self.prompt = ' '.join(sys.argv[1:]) if len(sys.argv) > 1 else input("Prompt: ")
