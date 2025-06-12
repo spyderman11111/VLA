@@ -1,196 +1,134 @@
 import sys
 import numpy as np
+import dataclasses
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image, JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 
-from lerobot.common.policies.pi0.modeling_pi0 import PI0Policy
-from lerobot.configs.types import FeatureType, PolicyFeature
+from openpi.training import config as pi0_config
+from openpi.policies import policy_config
+from openpi.shared import download
 
-# --- Define UR5Inputs and UR5Outputs classes ---
+
+def _parse_image(image):
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.floating):
+        image = (255 * image).astype(np.uint8)
+    if image.shape[0] == 3:
+        image = np.transpose(image, (1, 2, 0))
+    return image.astype(np.uint8)
+
+
+def pad_to_dim(array, dim):
+    pad_width = dim - array.shape[0]
+    if pad_width > 0:
+        return np.pad(array, (0, pad_width), mode="constant")
+    return array
+
+
+@dataclasses.dataclass(frozen=True)
 class UR5Inputs:
-    """Convert UR5 sensor data (images + joint state) to π0 model input format."""
-    def __init__(self, action_dim=14, adapt_to_pi=True):
-        """
-        action_dim: expected action dimension of the model (π0 uses 14 for arms):contentReference[oaicite:23]{index=23}.
-        adapt_to_pi: whether to transform joints to π0 internal frame.
-        """
-        self.action_dim = action_dim
-        self.adapt_to_pi = adapt_to_pi
-        # Expected camera channels for UR5 (base RGB and wrist RGB, for example)
-        self.EXPECTED_CAMERAS = ("base_rgb", "wrist_rgb")
-    
+    action_dim: int
+    model_type: str = "pi0"
+
     def __call__(self, data: dict) -> dict:
-        """
-        data: expects {'images': {name: np.array}, 'state': np.array} with 
-              joint angles in radians and images as numpy arrays.
-        Returns a dict ready for the π0 policy (keys: 'observation.image', 'observation.state').
-        """
-        # 1. Adapt joint state to π0 internal representation if needed.
-        state = data["state"].astype(np.float32)
-        if self.adapt_to_pi:
-            # (Placeholder for any specific joint angle flips or reordering needed)
-            # For simplicity, assume no reordering needed for UR5, or adapt handled internally.
-            # In real implementation, apply flip mask or transforms if provided.
-            pass
-        # 2. Pad the state to action_dim length (14):contentReference[oaicite:24]{index=24}.
-        if state.shape[0] < self.action_dim:
-            pad_len = self.action_dim - state.shape[0]
-            state = np.concatenate([state, np.zeros(pad_len, dtype=np.float32)])
-        else:
-            state = state[:self.action_dim]
-        # 3. Prepare image inputs.
-        images = data.get("images", {})
-        processed_images = {}
-        for cam in self.EXPECTED_CAMERAS:
-            if cam in images:
-                img = images[cam].astype(np.float32)
-                # Normalize image to [-1,1] if needed (π0 expects normalized images).
-                # Here, convert uint8 [0,255] to float32 [-1.0, 1.0].
-                if img.dtype == np.uint8:
-                    img = img / 127.5 - 1.0
-                processed_images[cam] = img
-            else:
-                # Missing camera: use a black image (zeros):contentReference[oaicite:25]{index=25}.
-                # Determine expected shape from any available image or default (3x224x224).
-                if processed_images:
-                    # use shape of an existing image
-                    ref_img = next(iter(processed_images.values()))
-                    zero_img = np.zeros_like(ref_img, dtype=np.float32)
-                else:
-                    # default to 3x224x224
-                    zero_img = np.zeros((3, 224, 224), dtype=np.float32)
-                processed_images[cam] = zero_img
-        # At this point, processed_images has at least 'base_rgb' and 'wrist_rgb'.
-        # We'll use only 'base_rgb' and possibly 'wrist_rgb' if provided.
-        # 4. Construct model input dict.
-        # Use the first available camera as "observation.image" (assuming base_rgb).
-        # If multiple images were expected, we could supply them as separate keys (e.g., observation.images.*).
-        # For simplicity, we feed the base camera as observation.image.
-        obs = {}
-        if "base_rgb" in processed_images:
-            # The model config uses 'observation.image' as key (single image):contentReference[oaicite:26]{index=26}.
-            obs["observation.image"] = processed_images["base_rgb"]
-        else:
-            # Fallback: if base_rgb not present, but we ensured it is, so not expected here.
-            obs["observation.image"] = next(iter(processed_images.values()))
-        obs["observation.state"] = state
-        return obs
+        joints = data.get("joints", np.zeros(6, dtype=np.float32))
+        gripper = data.get("gripper", np.zeros(1, dtype=np.float32))
+        state = np.concatenate([joints, gripper])
+        state = pad_to_dim(state, self.action_dim)
 
+        base_image = _parse_image(data["base_rgb"])
+        wrist_image = _parse_image(data.get("wrist_rgb", np.zeros_like(base_image)))
+
+        inputs = {
+            "observation/image": base_image,
+            "observation/wrist_image": wrist_image,
+            "observation/state": state,
+        }
+
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        return inputs
+
+
+@dataclasses.dataclass(frozen=True)
 class UR5Outputs:
-    """Convert π0 model output to UR5 joint target angles."""
-    def __init__(self, adapt_to_pi=True):
-        """
-        adapt_to_pi: whether model output is in π0 internal space and needs transformation back.
-        """
-        self.adapt_to_pi = adapt_to_pi
-    
-    def __call__(self, data):
-        """
-        data: model output, can be a dict with 'action(s)' or a numpy array of actions.
-        Returns a dict with 'actions': target joint angles for UR5.
-        """
-        # Normalize input format
-        if isinstance(data, dict) and "actions" in data:
-            actions = np.asarray(data["actions"])
-        else:
-            actions = np.asarray(data)  # assume data itself is the action array
-        # If the policy outputs a sequence, take the first step
-        if actions.ndim > 1:
-            # e.g., shape (T, 14), take index 0
-            actions = actions[0]
-        # Ensure it's 1D now of length 14.
-        actions = actions.flatten()
-        # If adapt was applied on input, we may need to invert that transform here.
-        if self.adapt_to_pi:
-            # (Placeholder: apply inverse of any joint flips or normalization if needed)
-            pass
-        # Take the first 7 values as UR5 joint targets (6 arm joints + gripper):contentReference[oaicite:27]{index=27}.
-        target_joints = actions[:7]
-        return {"actions": target_joints}
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["actions"], dtype=np.float32)
+        return {"actions": actions[:6]}
 
-# --- Define the ROS2 Node class ---
+
 class Pi0GraspNode(Node):
     def __init__(self):
         super().__init__('pi0_grasp_node')
-        # Declare and/or get the prompt parameter
         self.declare_parameter('prompt', '')
+        self.input_transform = UR5Inputs(action_dim=32)
+        self.output_transform = UR5Outputs()
         prompt_param = self.get_parameter('prompt').get_parameter_value().string_value
-        # Determine prompt source
         if prompt_param and prompt_param != '':
             self.prompt = prompt_param
         else:
-            # If no ROS param, check command-line args (excluding ROS args)
             cmd_args = [arg for arg in sys.argv[1:] if not arg.startswith('--ros-args')]
             if cmd_args:
-                # Join all cmd args as one prompt string
                 self.prompt = ' '.join(cmd_args)
             else:
-                # If no args, ask user (for direct run convenience)
                 self.prompt = input("Enter a grasp instruction for the robot: ").strip()
+
         self.get_logger().info(f"Using prompt: \"{self.prompt}\"")
-        
-        # Load the π0 policy model:contentReference[oaicite:28]{index=28}.
-        self.get_logger().info("Loading π0 model (this may take a few seconds)...")
-        self.policy = PI0Policy.from_pretrained("lerobot/pi0")
-        # Configure model input/output features:contentReference[oaicite:29]{index=29}:contentReference[oaicite:30]{index=30}.
-        self.policy.config.output_features = {
-            "action": PolicyFeature(type=FeatureType.ACTION, shape=(14,))
-        }
-        self.policy.config.input_features = {
-            "observation.image": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224)),
-            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(14,))
-        }
-        # Initialize UR5 input/output transformers
-        self.ur5_inputs = UR5Inputs(action_dim=14, adapt_to_pi=True)
-        self.ur5_outputs = UR5Outputs(adapt_to_pi=True)
-        # Subscribe to topics
-        self.image_sub = self.create_subscription(Image, '/camera/image_raw', self.image_callback, 10)
-        self.joint_sub = self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
-        # Publisher for joint trajectory
+
+        self.get_logger().info("Loading π0-base model (this may take a few seconds)...")
+        cfg = pi0_config.get_config("pi0_libero")
+        ckpt = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        self.policy = policy_config.create_trained_policy(cfg, ckpt)
+
         self.trajectory_pub = self.create_publisher(JointTrajectory, '/scaled_joint_trajectory_controller/joint_trajectory', 10)
-        # Storage for received messages
+        self.home_joint_names = [
+            'elbow_joint',
+            'shoulder_lift_joint',
+            'shoulder_pan_joint',
+            'wrist_1_joint',
+            'wrist_2_joint',
+            'wrist_3_joint'
+        ]
+        self.home_positions = [ 0.07505, -1.53058, 1.48675, -0.08071, -1.57239, -0.07874 ]
+        self.init_timer = self.create_timer(1.0, self.send_initial_pose)
+
+        self.image_sub = self.create_subscription(Image, '/camera/color/image_raw', self.image_callback, 10)
+        self.joint_sub = self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.latest_image = None
         self.latest_joints = None
-        # Flag to ensure we only process once
+        self.processed = True
+
+    def send_initial_pose(self):
+        traj = JointTrajectory()
+        traj.joint_names = self.home_joint_names
+        point = JointTrajectoryPoint()
+        point.positions = self.home_positions
+        point.velocities = [0.2] * len(self.home_positions)
+        point.time_from_start = Duration(sec=10)
+        traj.points = [point]
+        self.trajectory_pub.publish(traj)
+        self.get_logger().info("Initial home position trajectory published.")
+        self.init_timer.cancel()
         self.processed = False
-        self.get_logger().info("Pi0GraspNode initialized, waiting for sensor data...")
 
     def image_callback(self, msg: Image):
-        # Convert ROS Image to numpy array
-        # Determine image encoding and shape:contentReference[oaicite:31]{index=31}.
         height, width = msg.height, msg.width
-        img_format = msg.encoding  # e.g. "rgb8" or "bgr8"
-        img_data = np.frombuffer(msg.data, dtype=np.uint8)
-        # If the image data includes padding (step != width*channels), reshape carefully:
-        if msg.step != width * len(msg.data) / height:
-            # If there is padding, use step as row size in bytes.
-            img_data = img_data.reshape((height, msg.step))
-            img_data = img_data[:, :width * (msg.step // width)]  # remove padding
-            img_data = img_data.reshape(height, width, -1)
-        else:
-            # Straight reshape
-            img_data = img_data.reshape((height, width, -1))
-        # Handle channel order:
-        if img_format.lower() == 'bgr8':
-            # Convert BGR to RGB by reversing the last axis
+        img_data = np.frombuffer(msg.data, dtype=np.uint8).reshape((height, width, -1))
+        if msg.encoding.lower() == 'bgr8':
             img_data = img_data[:, :, ::-1]
-        # Now img_data is HxWx3 in RGB
-        # Transpose to 3xHxW (channel-first)
         img_data = np.transpose(img_data, (2, 0, 1))
-        self.latest_image = img_data
-        # Try processing if joint data is also available
+        self.latest_image = img_data.astype(np.uint8)
         if self.latest_joints is not None and not self.processed:
             self.process_data()
 
     def joint_callback(self, msg: JointState):
-        # Extract joint positions as numpy array
         if msg.position:
             joint_positions = np.array(msg.position, dtype=np.float32)
         else:
-            # If no positions in message, skip
             return
         self.latest_joints = {
             "positions": joint_positions,
@@ -200,60 +138,74 @@ class Pi0GraspNode(Node):
             self.process_data()
 
     def process_data(self):
-        """Once both image and joint data are available, run model inference and publish trajectory."""
-        self.processed = True  # ensure single execution
-        # Prepare the input for the model using UR5Inputs
-        images_dict = {"base_rgb": self.latest_image}
-        # If UR5Inputs expects more cameras, they will be auto-filled with zeros inside UR5Inputs
-        state_vec = self.latest_joints["positions"]
-        # Compose data dict for UR5Inputs
-        ur5_data = {"images": images_dict, "state": state_vec}
-        model_input = self.ur5_inputs(ur5_data)  # standardized input for π0
-        # Include the language prompt in the model input (assuming key 'goal' is used by policy):contentReference[oaicite:32]{index=32}.
-        model_input["goal"] = self.prompt
-        # Run model inference to get action
+        self.processed = True
+        base_img = np.transpose(self.latest_image, (1, 2, 0))
+        joints = self.latest_joints["positions"][:6]
+        data = {
+            "joints": joints,
+            "gripper": np.array([], dtype=np.float32),
+            "base_rgb": base_img,
+            "wrist_rgb": np.zeros_like(base_img, dtype=np.uint8),
+            "prompt": self.prompt
+        }
+
         try:
-            action = self.policy.select_action(model_input)
+            model_input = self.input_transform(data)
+            result = self.policy.infer(model_input)
+            output = self.output_transform(result)
+            target_joints = output["actions"].reshape(-1)
         except Exception as e:
-            self.get_logger().error(f"Model inference failed: {e}")
-            # Shutdown if inference fails
+            self.get_logger().error(f"Inference failed: {e}")
             rclpy.shutdown()
             return
-        # Process the output to get target joint angles
-        target = self.ur5_outputs({"actions": action})
-        target_joints = target["actions"]  # numpy array of 7 target joint positions
+
         self.get_logger().info(f"Predicted joint targets: {target_joints.tolist()}")
-        # Build JointTrajectory message to send to controller
+
         traj_msg = JointTrajectory()
-        traj_msg.header.stamp = self.get_clock().now().to_msg()  # current time
-        # Use the same joint name order as received in JointState for consistency
-        traj_msg.joint_names = self.latest_joints["names"]
-        # Create a single trajectory point
+        traj_msg.header.stamp = self.get_clock().now().to_msg()
+        traj_msg.joint_names = self.latest_joints["names"][:6]
         point = JointTrajectoryPoint()
-        point.positions = target_joints.astype(float).tolist()
-        point.time_from_start = Duration(sec=2, nanosec=0)  # 2 seconds to reach target
+        point.positions = target_joints.tolist()
+        point.time_from_start = Duration(sec=2)
         traj_msg.points.append(point)
-        # Publish the trajectory
         self.trajectory_pub.publish(traj_msg)
         self.get_logger().info("Published JointTrajectory to controller.")
-        # Shut down the node after publishing the command
-        self.get_logger().info("Shutting down node after issuing one command.")
-        self.destroy_node()
-        rclpy.shutdown()
+
+        self.return_timer = self.create_timer(3.0, self.return_home)
+
+    def return_home(self):
+        self.return_timer.cancel()
+        traj = JointTrajectory()
+        traj.joint_names = self.home_joint_names
+        point = JointTrajectoryPoint()
+        point.positions = self.home_positions
+        point.time_from_start = Duration(sec=2)
+        traj.points = [point]
+        self.trajectory_pub.publish(traj)
+        self.get_logger().info("Returning to home position trajectory published.")
+        new_prompt = input("Enter a new grasp instruction for the robot (or 'exit' to quit): ").strip()
+        if new_prompt == '' or new_prompt.lower() in ['exit', 'quit']:
+            self.get_logger().info("No new prompt. Shutting down node.")
+            self.destroy_node()
+            rclpy.shutdown()
+        else:
+            self.prompt = new_prompt
+            self.get_logger().info(f"Using prompt: \"{self.prompt}\"")
+            self.processed = False
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = Pi0GraspNode()
     try:
-        # Spin the node so callbacks are processed.
         rclpy.spin(node)
     except KeyboardInterrupt:
         node.get_logger().info("Keyboard interrupt, shutting down.")
     finally:
-        # Ensure proper shutdown
         if rclpy.ok():
             node.destroy_node()
             rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
